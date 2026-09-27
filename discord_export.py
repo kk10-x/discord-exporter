@@ -53,11 +53,15 @@ it just makes the same authenticated HTTP requests your Discord client makes.
                                transcript), or html (styled page you can
                                open in a browser)
         --with-attachments     Also download attached images/files
+        --no-threads           Skip threads (by default, active and archived
+                               threads under each channel are exported too,
+                               into a "<channel>_threads" subfolder)
 
     Examples:
         python discord_export.py --channel 123456789012345678
         python discord_export.py --guild 123456789012345678 --format html
         python discord_export.py --guild 123... --with-attachments --out my_export
+        python discord_export.py --guild <server-id> --with-attachments --format html --out <output-path>
 ================================================================================
 """
 import argparse
@@ -160,6 +164,52 @@ def api_request(path: str, token: str, params: dict | None = None) -> dict | lis
             raise
 
 
+def fetch_active_threads(guild_id: str, token: str) -> list[dict]:
+    data = api_request(f"/guilds/{guild_id}/threads/active", token)
+    return data.get("threads", [])
+
+
+def fetch_archived_threads(channel_id: str, token: str, private: bool) -> list[dict]:
+    threads = []
+    before = None
+    kind = "private" if private else "public"
+    while True:
+        params = {"limit": 100}
+        if before:
+            params["before"] = before
+        try:
+            data = api_request(f"/channels/{channel_id}/threads/archived/{kind}", token, params)
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                break  # no permission to list private archived threads here
+            raise
+        batch = data.get("threads", [])
+        if not batch:
+            break
+        threads.extend(batch)
+        if not data.get("has_more"):
+            break
+        before = batch[-1]["thread_metadata"]["archive_timestamp"]
+        time.sleep(0.3)
+    return threads
+
+
+def collect_threads_for_channel(
+    channel_id: str, guild_id: str | None, token: str, active_threads: list[dict] | None = None
+) -> list[dict]:
+    threads: dict[str, dict] = {}
+    if active_threads is None and guild_id:
+        active_threads = fetch_active_threads(guild_id, token)
+    for t in active_threads or []:
+        if t.get("parent_id") == channel_id:
+            threads[t["id"]] = t
+    for t in fetch_archived_threads(channel_id, token, private=False):
+        threads[t["id"]] = t
+    for t in fetch_archived_threads(channel_id, token, private=True):
+        threads[t["id"]] = t
+    return list(threads.values())
+
+
 def fetch_channel_messages(channel_id: str, token: str) -> list[dict]:
     messages = []
     before = None
@@ -203,7 +253,15 @@ def download_attachments(messages: list[dict], out_dir: Path):
 FORMAT_EXT = {"json": "json", "txt": "txt", "html": "html"}
 
 
-def export_channel(channel_id: str, token: str, out_dir: Path, with_attachments: bool, fmt: str = "json"):
+def export_channel(
+    channel_id: str,
+    token: str,
+    out_dir: Path,
+    with_attachments: bool,
+    fmt: str = "json",
+    include_threads: bool = True,
+    active_threads: list[dict] | None = None,
+):
     channel = api_request(f"/channels/{channel_id}", token)
     name = channel.get("name") or channel_id
     print(f"Exporting #{name} ({channel_id})...", file=sys.stderr)
@@ -226,14 +284,39 @@ def export_channel(channel_id: str, token: str, out_dir: Path, with_attachments:
     if with_attachments:
         download_attachments(messages, out_dir)
 
+    if include_threads:
+        threads = collect_threads_for_channel(channel_id, channel.get("guild_id"), token, active_threads)
+        if threads:
+            print(f"  found {len(threads)} thread(s) in #{name}", file=sys.stderr)
+            thread_dir = out_dir / f"{name}_threads"
+            for t in threads:
+                tname = t.get("name") or t["id"]
+                try:
+                    export_channel(t["id"], token, thread_dir, with_attachments, fmt, include_threads=False)
+                except Exception as e:
+                    print(f"    skipping thread \"{tname}\": {e}", file=sys.stderr)
 
-def export_guild(guild_id: str, token: str, out_dir: Path, with_attachments: bool, fmt: str = "json"):
+
+def export_guild(
+    guild_id: str, token: str, out_dir: Path, with_attachments: bool, fmt: str = "json", include_threads: bool = True
+):
     channels = api_request(f"/guilds/{guild_id}/channels", token)
     text_channels = [c for c in channels if c.get("type") in (0, 5)]  # 0=text, 5=announcement
     print(f"Found {len(text_channels)} text channels in guild {guild_id}", file=sys.stderr)
+
+    active_threads = fetch_active_threads(guild_id, token) if include_threads else []
+
     for c in text_channels:
         try:
-            export_channel(c["id"], token, out_dir / (channels_guild_name(channels) or guild_id), with_attachments, fmt)
+            export_channel(
+                c["id"],
+                token,
+                out_dir / (channels_guild_name(channels) or guild_id),
+                with_attachments,
+                fmt,
+                include_threads=include_threads,
+                active_threads=active_threads,
+            )
         except Exception as e:
             print(f"  skipping channel {c.get('name', c['id'])}: {e}", file=sys.stderr)
 
@@ -252,6 +335,10 @@ def main():
         "--format", choices=["json", "txt", "html"], default="json",
         help="Output format: json (raw, default), txt (readable transcript), or html (styled page)",
     )
+    parser.add_argument(
+        "--no-threads", action="store_true",
+        help="Skip exporting threads (active and archived) under each channel",
+    )
     args = parser.parse_args()
 
     token = os.environ.get("DISCORD_TOKEN")
@@ -263,10 +350,11 @@ def main():
         sys.exit(1)
 
     out_dir = Path(args.out)
+    include_threads = not args.no_threads
     if args.channel:
-        export_channel(args.channel, token, out_dir, args.with_attachments, args.format)
+        export_channel(args.channel, token, out_dir, args.with_attachments, args.format, include_threads)
     if args.guild:
-        export_guild(args.guild, token, out_dir, args.with_attachments, args.format)
+        export_guild(args.guild, token, out_dir, args.with_attachments, args.format, include_threads)
 
 
 if __name__ == "__main__":

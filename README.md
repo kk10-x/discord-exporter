@@ -15,7 +15,7 @@ Full instructions (getting your token, getting server/channel IDs, all options) 
 
 ## Known limitations
 
-- Threads (public/private) and forum channels are not included — only top-level text/announcement channels.
+- Active and archived threads under each text/announcement channel are exported into a `<channel>_threads` subfolder (use `--no-threads` to skip). Forum channels themselves are not yet handled.
 - Voice channel text chat is not included.
 - Embeds (link previews), stickers, and who-reacted-with-what are not exported/rendered.
 - DMs aren't bulk-exportable, but you can pass a DM's channel ID to `--channel` directly.
