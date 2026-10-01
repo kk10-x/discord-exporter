@@ -165,7 +165,20 @@ def api_request(path: str, token: str, params: dict | None = None) -> dict | lis
 
 
 def fetch_active_threads(guild_id: str, token: str) -> list[dict]:
-    data = api_request(f"/guilds/{guild_id}/threads/active", token)
+    try:
+        data = api_request(f"/guilds/{guild_id}/threads/active", token)
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            # This endpoint only works with a bot token; a user account token
+            # can't list currently-active threads in bulk. Archived threads
+            # (fetched per-channel below) are unaffected by this.
+            print(
+                "  note: can't list active threads with a user token (bot-only endpoint); "
+                "still-open threads that haven't auto-archived yet will be skipped.",
+                file=sys.stderr,
+            )
+            return []
+        raise
     return data.get("threads", [])
 
 
