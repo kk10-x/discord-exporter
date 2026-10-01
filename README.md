@@ -11,6 +11,13 @@ $env:DISCORD_TOKEN="paste_your_token_here"
 python discord_export.py --guild YOUR_SERVER_ID --with-attachments --format html --out my_export
 ```
 
+Only need specific channels? Use `--channel` with one or more comma-separated channel IDs instead of `--guild`, or combine `--guild` with `--only-channels` to pull just a few channels out of a whole server:
+
+```powershell
+python discord_export.py --channel 111111111111111111,222222222222222222 --format html
+python discord_export.py --guild YOUR_SERVER_ID --only-channels 111...,222... --format html
+```
+
 Full instructions (getting your token, getting server/channel IDs, all options) are in the docstring at the top of [`discord_export.py`](discord_export.py).
 
 ## Known limitations

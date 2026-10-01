@@ -41,14 +41,22 @@ it just makes the same authenticated HTTP requests your Discord client makes.
  4. Run it
 --------------------------------------------------------------------------------
     Syntax:
-        python discord_export.py (--channel ID | --guild ID) [options]
+        python discord_export.py (--channel ID[,ID...] | --guild ID) [options]
 
     Required (pick one):
-        --channel ID          Export a single channel
-        --guild ID            Export every text channel in a server
+        --channel ID[,ID...]   Export one or more specific channels directly
+                               (comma-separated IDs, no spaces), independent
+                               of any server
+        --guild ID             Export text channels in a server
 
-    Options:
-        --out DIR             Output directory (default: ./export)
+    Options (with --guild):
+        --only-channels ID[,ID...]
+                               Restrict the guild export to just these
+                               channel IDs (comma-separated) instead of
+                               every channel in the server
+
+    Options (either mode):
+        --out DIR              Output directory (default: ./export)
         --format FORMAT        json (default, raw data), txt (readable
                                transcript), or html (styled page you can
                                open in a browser)
@@ -59,9 +67,11 @@ it just makes the same authenticated HTTP requests your Discord client makes.
 
     Examples:
         python discord_export.py --channel 123456789012345678
+        python discord_export.py --channel 111111111111111111,222222222222222222
         python discord_export.py --guild 123456789012345678 --format html
         python discord_export.py --guild 123... --with-attachments --out my_export
         python discord_export.py --guild <server-id> --with-attachments --format html --out <output-path>
+        python discord_export.py --guild 123... --only-channels 111...,222... --format html
 ================================================================================
 """
 import argparse
@@ -311,11 +321,24 @@ def export_channel(
 
 
 def export_guild(
-    guild_id: str, token: str, out_dir: Path, with_attachments: bool, fmt: str = "json", include_threads: bool = True
+    guild_id: str,
+    token: str,
+    out_dir: Path,
+    with_attachments: bool,
+    fmt: str = "json",
+    include_threads: bool = True,
+    only_channels: set[str] | None = None,
 ):
     channels = api_request(f"/guilds/{guild_id}/channels", token)
     text_channels = [c for c in channels if c.get("type") in (0, 5)]  # 0=text, 5=announcement
-    print(f"Found {len(text_channels)} text channels in guild {guild_id}", file=sys.stderr)
+
+    if only_channels:
+        missing = only_channels - {c["id"] for c in text_channels}
+        if missing:
+            print(f"  warning: these channel IDs weren't found in this guild: {', '.join(missing)}", file=sys.stderr)
+        text_channels = [c for c in text_channels if c["id"] in only_channels]
+
+    print(f"Exporting {len(text_channels)} text channel(s) in guild {guild_id}", file=sys.stderr)
 
     active_threads = fetch_active_threads(guild_id, token) if include_threads else []
 
@@ -338,10 +361,30 @@ def channels_guild_name(channels: list[dict]) -> str | None:
     return None  # kept simple; folder falls back to guild id
 
 
+def parse_id_list(value: str) -> list[str]:
+    """'123, 456,789' -> ['123', '456', '789'], de-duped, order preserved."""
+    ids: list[str] = []
+    seen = set()
+    for part in value.split(","):
+        part = part.strip()
+        if part and part not in seen:
+            seen.add(part)
+            ids.append(part)
+    return ids
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export your own Discord message history locally.")
-    parser.add_argument("--channel", help="Export a single channel ID")
-    parser.add_argument("--guild", help="Export every text channel in a guild/server ID")
+    parser.add_argument(
+        "--channel",
+        help="Export one or more channel IDs directly (comma-separated), independent of any guild",
+    )
+    parser.add_argument("--guild", help="Export text channels in a guild/server ID")
+    parser.add_argument(
+        "--only-channels",
+        help="With --guild, restrict the export to just these channel IDs (comma-separated) "
+             "instead of every channel in the server",
+    )
     parser.add_argument("--out", default="export", help="Output directory (default: ./export)")
     parser.add_argument("--with-attachments", action="store_true", help="Also download attached files/images")
     parser.add_argument(
@@ -359,15 +402,25 @@ def main():
         print("Set DISCORD_TOKEN in your environment first.", file=sys.stderr)
         sys.exit(1)
     if not args.channel and not args.guild:
-        print("Pass --channel <id> or --guild <id>.", file=sys.stderr)
+        print("Pass --channel <id>[,<id>...] or --guild <id>.", file=sys.stderr)
+        sys.exit(1)
+    if args.only_channels and not args.guild:
+        print("--only-channels only makes sense together with --guild.", file=sys.stderr)
         sys.exit(1)
 
     out_dir = Path(args.out)
     include_threads = not args.no_threads
+
     if args.channel:
-        export_channel(args.channel, token, out_dir, args.with_attachments, args.format, include_threads)
+        for channel_id in parse_id_list(args.channel):
+            try:
+                export_channel(channel_id, token, out_dir, args.with_attachments, args.format, include_threads)
+            except Exception as e:
+                print(f"skipping channel {channel_id}: {e}", file=sys.stderr)
+
     if args.guild:
-        export_guild(args.guild, token, out_dir, args.with_attachments, args.format, include_threads)
+        only_channels = set(parse_id_list(args.only_channels)) if args.only_channels else None
+        export_guild(args.guild, token, out_dir, args.with_attachments, args.format, include_threads, only_channels)
 
 
 if __name__ == "__main__":
